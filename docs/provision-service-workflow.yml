@@ -1,0 +1,51 @@
+# Blueprint for a central Platform Scaffolder repository (e.g., platform-service-scaffolder)
+# Exposes a self-service GitHub Actions form (workflow_dispatch) that creates a new microservice
+# from this Golden Template and immediately locks down main branch protection atomically.
+name: Provision Compliant Microservice
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: 'New microservice repository name (e.g., provider-eligibility-saga-service)'
+        required: true
+        type: string
+      enforce_admins:
+        description: 'Enforce branch rules on repository admins'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  scaffold-and-lock:
+    name: Create Repo from Template & Enforce Branch Protection
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_PROVISIONER_TOKEN }}
+      OWNER: jmwuerth
+      TEMPLATE_REPO: healthcare-payments-saga-ops
+    steps:
+      - name: 1. Generate Repository from Golden Template
+        run: |
+          gh repo create "${OWNER}/${{ inputs.service_name }}" \
+            --template "${OWNER}/${TEMPLATE_REPO}" \
+            --private
+
+      - name: 2. Lock Down main Branch Protection Immediately
+        run: |
+          gh api -X PUT "/repos/${OWNER}/${{ inputs.service_name }}/branches/main/protection" \
+            -H "Accept: application/vnd.github+json" \
+            --input - << 'JSON'
+          {
+            "required_status_checks": {
+              "strict": true,
+              "contexts": ["build-and-test"]
+            },
+            "enforce_admins": ${{ inputs.enforce_admins }},
+            "required_pull_request_reviews": {
+              "required_approving_review_count": 1,
+              "require_code_owner_reviews": true
+            },
+            "restrictions": null
+          }
+          JSON
