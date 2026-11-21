@@ -1,0 +1,22 @@
+name: Healthcare Payments CI/CD Quality Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Run Concurrency/Guardrail Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore & Build (Treat Warnings as Errors)
+        run: dotnet build HealthcarePayments.sln --configuration Release -warnaserror
+      - name: Execute xUnit Saga, Pipeline & AI Guardrail Gates
+        run: dotnet test HealthcarePayments.sln --configuration Release --no-build --verbosity normal
