@@ -87,3 +87,72 @@ gh repo create <org>/<new-service-name> \
   --private \
   --clone
 ```
+
+### Optional: Run the Angular Component in a Throwaway Harness
+
+To visually test `ClaimSettlementComponent` and verify the `exhaustMap` double-click guard in Chrome DevTools without running SQL Server or the .NET API:
+
+1. **Scaffold a temporary Angular app and copy the component:**
+   ```bash
+   REPO_DIR=\$(pwd)
+   cd /tmp
+   npx -y @angular/cli@latest new saga-demo --minimal --style=css --routing=false --ssr=false --ai-config=none
+   cd saga-demo
+   cp "\$REPO_DIR/frontend/src/app/claim-settlement.component.ts" src/app/claim-settlement.component.ts
+   ```
+
+2. **Wire `src/main.ts`, `src/index.html`, and a local Node mock proxy** (using `proxy.conf.json` ensures real `Fetch/XHR` requests appear in Chrome DevTools' Network tab):
+   ```bash
+   cat << 'INNER' > src/main.ts
+   import { bootstrapApplication } from '@angular/platform-browser';
+   import { provideHttpClient } from '@angular/common/http';
+   import { ClaimSettlementComponent } from './app/claim-settlement.component';
+
+   bootstrapApplication(ClaimSettlementComponent, {
+     providers: [provideHttpClient()]
+   });
+   INNER
+
+   cat << 'INNER' > src/index.html
+   <!doctype html>
+   <html lang="en">
+   <head><meta charset="utf-8"><title>Healthcare Payments Saga Ops</title></head>
+   <body style="background:#f6f8fa; padding:32px;">
+     <app-claim-settlement></app-claim-settlement>
+   </body>
+   </html>
+   INNER
+
+   cat << 'INNER' > mock-api.mjs
+   import { createServer } from 'node:http';
+   import { randomUUID } from 'node:crypto';
+   createServer((req, res) => {
+     let raw = '';
+     req.on('data', c => raw += c);
+     req.on('end', () => {
+       const body = raw ? JSON.parse(raw) : {};
+       setTimeout(() => {
+         res.writeHead(200, { 'Content-Type': 'application/json' });
+         res.end(JSON.stringify({
+           sagaId: randomUUID(), claimId: body.claimId,
+           amount: body.amount, state: 2, traceId: body.traceId
+         }));
+       }, 600);
+     });
+   }).listen(3000);
+   INNER
+
+   echo '{ "/api": { "target": "http://localhost:3000", "secure": false } }' > proxy.conf.json
+   ```
+
+3. **Launch and verify in Chrome DevTools:**
+   ```bash
+   node mock-api.mjs & npx ng serve --proxy-config proxy.conf.json --open
+   ```
+   Open **Chrome DevTools → Network (`Fetch/XHR`)** and rapidly click **Settle Provider Claim ($12,500)** 4–5 times. Confirm only **one** `POST /api/claims/settle` request fires while in-flight, and the `Idempotency Key` rotates upon `200 OK`.
+
+4. **Clean up the temporary harness:**
+   ```bash
+   pkill -f "mock-api.mjs" || true
+   rm -rf /tmp/saga-demo
+   ```
