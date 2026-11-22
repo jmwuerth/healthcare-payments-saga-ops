@@ -94,11 +94,11 @@ To visually test `ClaimSettlementComponent` and verify the `exhaustMap` double-c
 
 1. **Scaffold a temporary Angular app and copy the component:**
    ```bash
-   REPO_DIR=\$(pwd)
+   REPO_DIR=$(pwd)
    cd /tmp
    npx -y @angular/cli@latest new saga-demo --minimal --style=css --routing=false --ssr=false --ai-config=none
    cd saga-demo
-   cp "\$REPO_DIR/frontend/src/app/claim-settlement.component.ts" src/app/claim-settlement.component.ts
+   cp "$REPO_DIR/frontend/src/app/claim-settlement.component.ts" src/app/claim-settlement.component.ts
    ```
 
 2. **Wire `src/main.ts`, `src/index.html`, and a local Node mock proxy** (using `proxy.conf.json` ensures real `Fetch/XHR` requests appear in Chrome DevTools' Network tab):
