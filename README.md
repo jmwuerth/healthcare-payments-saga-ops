@@ -61,6 +61,7 @@ The left side shows the settled Angular `ClaimSettlementComponent`: the success 
 
 ### Prerequisites
 * [.NET 10 SDK](https://microsoft.com)
+- **Node.js LTS** (`v22.22.3+`, `v24.15.0+`, or `v26+` — required for the Angular harness)
 * GitHub CLI (`gh`) and [OpenCode](https://opencode.ai) (optional, for AI-assisted feature scaffolding)
 
 ### Build & Run Quality Gates Locally
