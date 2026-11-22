@@ -20,3 +20,52 @@ jobs:
         run: dotnet build HealthcarePayments.sln --configuration Release -warnaserror
       - name: Execute xUnit Saga, Pipeline & AI Guardrail Gates
         run: dotnet test HealthcarePayments.sln --configuration Release --no-build --verbosity normal
+
+  angular-build:
+    name: Angular Template Build & Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NG_CLI_ANALYTICS: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Scaffold Minimal Angular Workspace in /tmp/ci-angular
+        working-directory: /tmp
+        run: |
+          rm -rf ci-angular
+          npx -y @angular/cli@20 new ci-angular \
+            --minimal \
+            --style=css \
+            --routing=false \
+            --ssr=false \
+            --skip-git \
+            --package-manager=npm \
+            --defaults
+      - name: Copy ClaimSettlementComponent into /tmp/ci-angular
+        run: cp frontend/src/app/claim-settlement.component.ts /tmp/ci-angular/src/app/claim-settlement.component.ts
+      - name: Wire Component into Bootstrap
+        run: |
+          cat > /tmp/ci-angular/src/main.ts <<'EOF'
+          import { bootstrapApplication } from '@angular/platform-browser';
+          import { provideHttpClient } from '@angular/common/http';
+          import { ClaimSettlementComponent } from './app/claim-settlement.component';
+
+          bootstrapApplication(ClaimSettlementComponent, {
+            providers: [provideHttpClient()]
+          });
+          EOF
+
+          cat > /tmp/ci-angular/src/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><title>Healthcare Payments Saga Ops</title></head>
+          <body><app-claim-settlement></app-claim-settlement></body>
+          </html>
+          EOF
+      - name: Build (AOT Template Typecheck)
+        working-directory: /tmp/ci-angular
+        run: npx ng build

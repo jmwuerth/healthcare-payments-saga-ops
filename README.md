@@ -14,10 +14,11 @@ This repository demonstrates two core pillars required for high-throughput finan
 ├── .github/
 │   ├── CODEOWNERS                  # Dual-control approval rules for SQL, Guardrails & CI/CD
 │   └── workflows/
-│       └── ci-cd.yml               # Blocks PRs/merges unless -warnaserror & xUnit gates pass
+│       └── ci-cd.yml               # Blocks PRs/merges unless .NET, xUnit & Angular AOT gates pass
 ├── docs/
 │   ├── ARCHITECTURE.md             # Deep dive: 2PC vs. Saga/Outbox & Pipelines backpressure
-│   └── images/saga-idempotency-demo.png # Split-screen UI + DevTools Network proof of idempotency.
+│   ├── images/saga-idempotency-demo.png # Split-screen UI + DevTools Network proof of idempotency.
+│   └── images/saga-compensation-409-demo.png # 409 Conflict proof: automatic compensation + preserved key.
 ├── frontend/src/app/
 │   └── claim-settlement.component.ts # Angular standalone UI with exhaustMap double-click guard
 ├── sql/
@@ -53,7 +54,11 @@ This repository demonstrates two core pillars required for high-throughput finan
 
 ![Split-screen view of ClaimSettlementComponent and Chrome DevTools Network tab](docs/images/saga-idempotency-demo.png)
 
+![Split-screen view of ClaimSettlementComponent 409 compensation and Chrome DevTools Network tab](docs/images/saga-compensation-409-demo.png)
+
 The left side shows the settled Angular `ClaimSettlementComponent`: the success banner with the returned **SagaId** and **Trace**, plus the **Idempotency Key** badge displaying the rotated key (first 8 characters of the new `claimId`). The right side shows Chrome DevTools **Network (Fetch/XHR)** during rapid clicking — exactly **one** `POST /api/claims/settle` request is issued, because RxJS `exhaustMap` drops every click that arrives while the settlement is in flight. A second request only appears after the key rotates on `200 OK`; a `409 Conflict` leaves the key untouched so retries stay idempotent.
+
+The `409 Conflict` view demonstrates automatic **semantic-lock compensation**. When the clearinghouse rejects the ACH settlement (or a compliance guardrail fails), the orchestrator invokes `CompensateReservationAsync`, restoring the reserved amount to `AvailableBalance` and rendering the **semantic-lock compensation banner** with **Saga Compensated (409)** and the compensation reason. Unlike the `200 OK` settlement above — which rotates the **Idempotency Key** (`claimId`) so the next claim gets a fresh key — a compensated response keeps the **Idempotency Key** (`claimId`) **unchanged**. Every sequential operator retry therefore reuses the same idempotency key, so the server can recognize the retry, re-attempt reservation cleanly, and avoid double-paying or double-reserving funds.
 
 ---
 
