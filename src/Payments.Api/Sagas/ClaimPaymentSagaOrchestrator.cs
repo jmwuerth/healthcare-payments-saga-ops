@@ -37,11 +37,29 @@ public sealed class ClaimPaymentSagaOrchestrator(
 
         // 1. Idempotency & Atomic Reservation inside Payer boundary
         var reservation = await ledgerStore.TryReserveFundsAsync(cmd, ct);
+
+        // A previously settled claim is a pure replay: return the stored outcome without
+        // re-running the guardrail or issuing a second ACH settlement.
+        if (reservation.Success && reservation.CurrentState == SagaState.Settled)
+        {
+            var existing = await ledgerStore.GetSettledRecordAsync(reservation.SagaId, ct);
+            if (existing is not null)
+            {
+                logger.LogInformation("Trace={TraceId} Claim={ClaimId} Saga={SagaId} replay of settled claim; returning existing record.",
+                    cmd.TraceId, cmd.ClaimId, reservation.SagaId);
+                return existing;
+            }
+
+            logger.LogInformation("Trace={TraceId} Claim={ClaimId} Saga={SagaId} replay of settled claim.",
+                cmd.TraceId, cmd.ClaimId, reservation.SagaId);
+            return new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, SagaState.Settled, cmd.TraceId);
+        }
+
         if (!reservation.Success)
         {
             logger.LogWarning("Trace={TraceId} Claim={ClaimId} rejected: {Reason}",
                 cmd.TraceId, cmd.ClaimId, reservation.Error);
-            return new SagaExecutionRecord(Guid.Empty, cmd.ClaimId, cmd.Amount, SagaState.Compensated, cmd.TraceId, reservation.Error);
+            return new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, reservation.CurrentState, cmd.TraceId, reservation.Error);
         }
 
         // 2. Deterministic AI/Compliance Invariant Guardrail
@@ -64,19 +82,21 @@ public sealed class ClaimPaymentSagaOrchestrator(
             return new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, SagaState.Compensated, cmd.TraceId, "Clearinghouse settlement rejected");
         }
 
-        await ledgerStore.MarkSettledAsync(reservation.SagaId, ct);
+        var settledRecord = new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, SagaState.Settled, cmd.TraceId);
+        await ledgerStore.MarkSettledAsync(settledRecord, ct);
         logger.LogInformation("Trace={TraceId} Claim={ClaimId} Saga={SagaId} settled for ${Amount}",
             cmd.TraceId, cmd.ClaimId, reservation.SagaId, cmd.Amount);
 
-        return new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, SagaState.Settled, cmd.TraceId);
+        return settledRecord;
     }
 }
 
 public interface IPaymentLedgerStore
 {
-    Task<(bool Success, Guid SagaId, string? Error)> TryReserveFundsAsync(ClaimPaymentCommand cmd, CancellationToken ct);
+    Task<(bool Success, Guid SagaId, SagaState CurrentState, string? Error)> TryReserveFundsAsync(ClaimPaymentCommand cmd, CancellationToken ct);
     Task CompensateReservationAsync(Guid sagaId, Guid payerId, decimal amount, CancellationToken ct);
-    Task MarkSettledAsync(Guid sagaId, CancellationToken ct);
+    Task MarkSettledAsync(SagaExecutionRecord record, CancellationToken ct);
+    Task<SagaExecutionRecord?> GetSettledRecordAsync(Guid sagaId, CancellationToken ct);
 }
 
 public interface IClearinghouseGateway
@@ -90,28 +110,42 @@ public sealed class InMemoryPaymentLedgerStore : IPaymentLedgerStore
     private readonly ConcurrentDictionary<Guid, decimal> _balances = new();
     private readonly ConcurrentDictionary<Guid, Guid> _idempotencyIndex = new();
     private readonly ConcurrentDictionary<Guid, SagaState> _sagaStates = new();
+    private readonly ConcurrentDictionary<Guid, SagaExecutionRecord> _settledRecords = new();
     private readonly object _lock = new();
 
     public void SeedPayerBalance(Guid payerId, decimal balance) => _balances[payerId] = balance;
     public decimal GetBalance(Guid payerId) => _balances.GetValueOrDefault(payerId, 0m);
     public SagaState GetSagaState(Guid sagaId) => _sagaStates[sagaId];
 
-    public Task<(bool Success, Guid SagaId, string? Error)> TryReserveFundsAsync(ClaimPaymentCommand cmd, CancellationToken ct)
+    public Task<(bool Success, Guid SagaId, SagaState CurrentState, string? Error)> TryReserveFundsAsync(ClaimPaymentCommand cmd, CancellationToken ct)
     {
         lock (_lock)
         {
             if (_idempotencyIndex.TryGetValue(cmd.ClaimId, out var existingSagaId))
-                return Task.FromResult((true, existingSagaId, (string?)null));
+            {
+                var existingState = _sagaStates.GetValueOrDefault(existingSagaId, SagaState.Reserved);
+
+                // Already settled: the caller must return the stored outcome without re-settling.
+                if (existingState == SagaState.Settled)
+                    return Task.FromResult((true, existingSagaId, SagaState.Settled, (string?)null));
+
+                // In-flight: reject concurrent duplicate execution for the same claim.
+                if (existingState == SagaState.Reserved)
+                    return Task.FromResult((false, existingSagaId, SagaState.Reserved, (string?)"Settlement already in progress for ClaimId"));
+
+                // Compensated: the prior attempt released its funds, so a retry reserves cleanly.
+                _idempotencyIndex.TryRemove(cmd.ClaimId, out _);
+            }
 
             decimal current = _balances.GetValueOrDefault(cmd.PayerId, 0m);
             if (current < cmd.Amount)
-                return Task.FromResult((false, Guid.Empty, (string?)"Insufficient payer liquidity"));
+                return Task.FromResult((false, Guid.Empty, SagaState.Compensated, (string?)"Insufficient payer liquidity"));
 
             _balances[cmd.PayerId] = current - cmd.Amount;
             var sagaId = Guid.NewGuid();
             _idempotencyIndex[cmd.ClaimId] = sagaId;
             _sagaStates[sagaId] = SagaState.Reserved;
-            return Task.FromResult((true, sagaId, (string?)null));
+            return Task.FromResult((true, sagaId, SagaState.Reserved, (string?)null));
         }
     }
 
@@ -128,9 +162,19 @@ public sealed class InMemoryPaymentLedgerStore : IPaymentLedgerStore
         return Task.CompletedTask;
     }
 
-    public Task MarkSettledAsync(Guid sagaId, CancellationToken ct)
+    public Task MarkSettledAsync(SagaExecutionRecord record, CancellationToken ct)
     {
-        _sagaStates[sagaId] = SagaState.Settled;
+        lock (_lock)
+        {
+            _sagaStates[record.SagaId] = SagaState.Settled;
+            _settledRecords[record.SagaId] = record;
+        }
         return Task.CompletedTask;
+    }
+
+    public Task<SagaExecutionRecord?> GetSettledRecordAsync(Guid sagaId, CancellationToken ct)
+    {
+        _settledRecords.TryGetValue(sagaId, out var record);
+        return Task.FromResult(record);
     }
 }
