@@ -19,8 +19,15 @@ This repository demonstrates two core pillars required for high-throughput finan
 │   ├── ARCHITECTURE.md             # Deep dive: 2PC vs. Saga/Outbox & Pipelines backpressure
 │   ├── images/saga-idempotency-demo.png # Split-screen UI + DevTools Network proof of idempotency.
 │   └── images/saga-compensation-409-demo.png # 409 Conflict proof: automatic compensation + preserved key.
-├── frontend/src/app/
-│   └── claim-settlement.component.ts # Angular standalone UI with exhaustMap double-click guard
+├── frontend/
+│   ├── mock-api.mjs                  # Cross-platform Node mock API (200 OK / 409 Conflict)
+│   ├── package.json                  # Angular 20 workspace + concurrently scripts
+│   ├── proxy.conf.json               # Forwards /api to http://localhost:3000
+│   └── src/
+│       ├── index.html                # Mounts <app-claim-settlement>
+│       ├── main.ts                   # Bootstrap with provideHttpClient()
+│       └── app/
+│           └── claim-settlement.component.ts # Angular standalone UI with exhaustMap double-click guard
 ├── sql/
 │   └── 001_init_ledger_and_outbox.sql # Atomic balance reservation + Transactional Outbox DDL/SP
 ├── src/Payments.Api/
@@ -77,7 +84,7 @@ The `409 Conflict` view demonstrates automatic **semantic-lock compensation**. W
 
 ### Prerequisites
 * [.NET 10 SDK](https://microsoft.com)
-- **Node.js LTS** (`v22.22.3+`, `v24.15.0+`, or `v26+` — required for the Angular harness)
+- **Node.js** `^20.19.0`, `^22.12.0`, or `>=24.0.0` (Angular 20 workspace; verified locally on Node 22.12.0)
 * GitHub CLI (`gh`) and [OpenCode](https://opencode.ai) (optional, for AI-assisted feature scaffolding)
 
 ### Build & Run Quality Gates Locally
@@ -105,71 +112,44 @@ gh repo create <org>/<new-service-name> \
   --clone
 ```
 
-### Optional: Run the Angular Component in a Throwaway Harness
+### Run the Angular Frontend with the Local Mock API
 
-To visually test `ClaimSettlementComponent` and verify the `exhaustMap` double-click guard in Chrome DevTools without running SQL Server or the .NET API:
+`frontend/` is a permanent, standalone Angular 20 workspace checked into this repository:
 
-1. **Scaffold a temporary Angular app and copy the component:**
-   ```bash
-   REPO_DIR=$(pwd)
-   cd /tmp
-   npx -y @angular/cli@latest new saga-demo --minimal --style=css --routing=false --ssr=false --ai-config=none
-   cd saga-demo
-   cp "$REPO_DIR/frontend/src/app/claim-settlement.component.ts" src/app/claim-settlement.component.ts
-   ```
+| Path | Purpose |
+| --- | --- |
+| `frontend/package.json` | Angular 20 dependencies plus `mock` and `start:mock` scripts (`concurrently`). |
+| `frontend/proxy.conf.json` | Forwards `/api` to `http://localhost:3000` so requests are real HTTP traffic. |
+| `frontend/mock-api.mjs` | Cross-platform Node mock server (built-in `node:http` / `node:crypto`, 600 ms latency). |
+| `frontend/src/main.ts` | Bootstraps `ClaimSettlementComponent` with `provideHttpClient()`. |
+| `frontend/src/index.html` | Mounts `<app-claim-settlement></app-claim-settlement>`. |
 
-2. **Wire `src/main.ts`, `src/index.html`, and a local Node mock proxy** (using `proxy.conf.json` ensures real `Fetch/XHR` requests appear in Chrome DevTools' Network tab):
-   ```bash
-   cat << 'INNER' > src/main.ts
-   import { bootstrapApplication } from '@angular/platform-browser';
-   import { provideHttpClient } from '@angular/common/http';
-   import { ClaimSettlementComponent } from './app/claim-settlement.component';
+Start the mock API and the Angular dev server together:
 
-   bootstrapApplication(ClaimSettlementComponent, {
-     providers: [provideHttpClient()]
-   });
-   INNER
+```bash
+cd frontend
+npm install
+npm run start:mock     # mock API on :3000 + ng serve with proxy.conf.json
+```
 
-   cat << 'INNER' > src/index.html
-   <!doctype html>
-   <html lang="en">
-   <head><meta charset="utf-8"><title>Healthcare Payments Saga Ops</title></head>
-   <body style="background:#f6f8fa; padding:32px;">
-     <app-claim-settlement></app-claim-settlement>
-   </body>
-   </html>
-   INNER
+Open the dev-server URL, then use **Chrome DevTools → Network (`Fetch/XHR`)** and rapidly click **Settle Provider Claim ($12,500)** 4–5 times. Only one `POST /api/claims/settle` should be in flight at a time, and the `Idempotency Key` rotates after `200 OK`.
 
-   cat << 'INNER' > mock-api.mjs
-   import { createServer } from 'node:http';
-   import { randomUUID } from 'node:crypto';
-   createServer((req, res) => {
-     let raw = '';
-     req.on('data', c => raw += c);
-     req.on('end', () => {
-       const body = raw ? JSON.parse(raw) : {};
-       setTimeout(() => {
-         res.writeHead(200, { 'Content-Type': 'application/json' });
-         res.end(JSON.stringify({
-           sagaId: randomUUID(), claimId: body.claimId,
-           amount: body.amount, state: 2, traceId: body.traceId
-         }));
-       }, 600);
-     });
-   }).listen(3000);
-   INNER
+The mock returns `200 OK` (`state: 2`) by default. To exercise the compensation UI, start it with `--409` or send the `X-Mock-Status: 409` header:
 
-   echo '{ "/api": { "target": "http://localhost:3000", "secure": false } }' > proxy.conf.json
-   ```
+```bash
+npm run mock -- --409    # every settlement returns 409 Conflict (state: 3 + failureReason)
+```
 
-3. **Launch and verify in Chrome DevTools:**
-   ```bash
-   node mock-api.mjs & npx ng serve --proxy-config proxy.conf.json --open
-   ```
-   Open **Chrome DevTools → Network (`Fetch/XHR`)** and rapidly click **Settle Provider Claim ($12,500)** 4–5 times. Confirm only **one** `POST /api/claims/settle` request fires while in-flight, and the `Idempotency Key` rotates upon `200 OK`.
+Verify the workspace without starting a server:
 
-4. **Clean up the temporary harness:**
-   ```bash
-   pkill -f "mock-api.mjs" || true
-   rm -rf /tmp/saga-demo
-   ```
+```bash
+cd frontend
+npx ng build
+```
+
+#### Why keep a permanent mock workspace instead of the `/tmp` throwaway harness?
+
+* **Zero-Friction Onboarding:** Anyone cloning the repo can run `npm run start:mock` in `frontend/` and immediately test `ClaimSettlementComponent` in the browser instead of manually running `ng new` and `cat << 'INNER'` shell scripts in `/tmp`.
+* **Built-In `409 Conflict` & Failure Simulation:** In the real .NET API (`Program.cs`), `InMemoryPaymentLedgerStore` starts empty so every HTTP call returns `409 "Insufficient payer liquidity"`, and `SimulatedClearinghouseGateway` only rejects NPIs starting with `999`. Because `ClaimSettlementComponent` hardcodes `providerNpi: '1234567890'`, a permanent `mock-api.mjs` lets you easily toggle between `200 OK` (idempotency key rotation) and `409 Conflict` (semantic-lock compensation with key preservation) to test both UI states.
+* **Real Chrome DevTools Network & Latency Inspection:** Unlike in-memory Angular mocks, `mock-api.mjs` + `proxy.conf.json` routes real HTTP `POST /api/claims/settle` traffic over `localhost` with configurable latency (600ms), proving RxJS `exhaustMap` drops duplicate clicks in the `Fetch/XHR` tab.
+* **Faster CI & AOT Typechecking:** Now that `frontend/` is a real Angular workspace in the repo, GitHub Actions `ci-cd.yml` can run `npm ci && npx ng build` inside `frontend/` instead of scaffolding a brand-new Angular project in `/tmp/ci-angular` on every push.
