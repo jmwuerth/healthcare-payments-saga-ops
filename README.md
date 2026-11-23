@@ -48,6 +48,17 @@ This repository demonstrates two core pillars required for high-throughput finan
 * **Deterministic AI & Policy Guardrails (`PaymentComplianceGuardrail.cs`):** Enforces strict financial ceilings (`$250,000` automated limit) and 10-digit NPI validation before funds move, tested against a `0-byte` managed heap allocation SLA (`GC.GetTotalMemory`).
 * **Frontend Idempotency (`claim-settlement.component.ts`):** Uses RxJS `exhaustMap` and Angular Signals to drop duplicate clicks while a Saga is in flight, rotating a client-side UUID `claimId` upon settlement.
 
+### Why Saga + Transactional Outbox Over Two-Phase Commit (2PC)?
+
+2PC holds distributed locks across every participant until the slowest one votes, so a single stalled ACH or ledger call freezes payer balances service-wide. This template keeps all locking local and makes the event publication atomic with the state change. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the sequence diagrams and `System.IO.Pipelines` backpressure internals.
+
+| Concern | Two-Phase Commit (2PC / MSDTC) | Saga Orchestration + Outbox (This Template) |
+| --- | --- | --- |
+| **Locking & Contention** | Enlists every resource manager; locks are held network-wide until the coordinator commits or aborts, so one slow participant blocks unrelated claims. | Single local T-SQL transaction applying the semantic lock `AvailableBalance` → `ReservedBalance`; no lock survives the commit. |
+| **Event Atomicity** | No guarantee that the commit and the downstream event publish both succeed; a crash between them silently loses the event. | `ClaimFundsReserved.v1` is written to `dbo.OutboxMessages` in the **same** local ACID transaction as the balance mutation. |
+| **Failure & Rollback** | Abort requires every participant to be reachable and to honor the prepared vote; heuristic outcomes leave balances stranded. | `CompensateReservationAsync` restores reserved funds on any post-reservation failure and returns `409 Conflict` with liquidity fully restored. |
+| **Retry Safety** | Retry semantics are coordinator-defined; duplicate commits after a timeout are a real double-charge risk. | Client-generated `ClaimId` idempotency keys make replays safe, and the Angular `exhaustMap` guard suppresses duplicate in-flight clicks. |
+
 ---
 
 ## Proof of Idempotency & Double-Click Guard
