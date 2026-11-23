@@ -36,7 +36,7 @@ dotnet run --project src/Payments.Api                                      # htt
 - `SimulatedClearinghouseGateway` (in `Program.cs`) rejects any NPI starting with `999` — the fastest way to force a compensation path.
 - `ingest-batch` returns `202` with the count of *parsed* frames; the `ClaimSagaConsumerWorker` settles them asynchronously afterward.
 - `sql/001_init_ledger_and_outbox.sql` (SQL Server: `dbo`, `GO`, `THROW`) is never executed, migrated, or referenced. The in-memory store is the only ledger.
-- `frontend/` has no `package.json` or toolchain — don't run npm/node or invent frontend scripts.
+- `frontend/` is a real Angular 20 workspace with a local mock API. From `frontend/`: `npm install`, then `npm run start:mock` (runs `mock-api.mjs` + `ng serve --proxy-config proxy.conf.json`). Verify AOT with `npx ng build`; use `npm run mock -- --409` or the `X-Mock-Status: 409` header to exercise compensation.
 
 ## Invariants to preserve
 
