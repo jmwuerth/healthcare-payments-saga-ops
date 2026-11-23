@@ -118,7 +118,7 @@ gh repo create <org>/<new-service-name> \
 
 | Path | Purpose |
 | --- | --- |
-| `frontend/package.json` | Angular 20 dependencies plus `mock` and `start:mock` scripts (`concurrently`). |
+| `frontend/package.json` | Angular 20 dependencies plus `mock`, `start:mock`, and `start:mock:409` scripts (`concurrently`). |
 | `frontend/proxy.conf.json` | Forwards `/api` to `http://localhost:3000` so requests are real HTTP traffic. |
 | `frontend/mock-api.mjs` | Cross-platform Node mock server (built-in `node:http` / `node:crypto`, 600 ms latency). |
 | `frontend/src/main.ts` | Bootstraps `ClaimSettlementComponent` with `provideHttpClient()`. |
@@ -129,12 +129,13 @@ Start the mock API and the Angular dev server together:
 ```bash
 cd frontend
 npm install
-npm run start:mock     # mock API on :3000 + ng serve with proxy.conf.json
+npm run start:mock       # 200 OK mock on :3000 + ng serve with proxy.conf.json
+npm run start:mock:409   # 409 Conflict mock on :3000 + ng serve with proxy.conf.json
 ```
 
 Open the dev-server URL, then use **Chrome DevTools → Network (`Fetch/XHR`)** and rapidly click **Settle Provider Claim ($12,500)** 4–5 times. Only one `POST /api/claims/settle` should be in flight at a time, and the `Idempotency Key` rotates after `200 OK`.
 
-The mock returns `200 OK` (`state: 2`) by default. To exercise the compensation UI, start it with `--409` or send the `X-Mock-Status: 409` header:
+The mock returns `200 OK` (`state: 2`) by default. To exercise the compensation UI, run `npm run start:mock:409` to launch both the `409 Conflict` mock server and Angular together. For the mock server alone, start it with `--409` or send the `X-Mock-Status: 409` header:
 
 ```bash
 npm run mock -- --409    # every settlement returns 409 Conflict (state: 3 + failureReason)
