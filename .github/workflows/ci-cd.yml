@@ -33,39 +33,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Scaffold Minimal Angular Workspace in /tmp/ci-angular
-        working-directory: /tmp
-        run: |
-          rm -rf ci-angular
-          npx -y @angular/cli@20 new ci-angular \
-            --minimal \
-            --style=css \
-            --routing=false \
-            --ssr=false \
-            --skip-git \
-            --package-manager=npm \
-            --defaults
-      - name: Copy ClaimSettlementComponent into /tmp/ci-angular
-        run: cp frontend/src/app/claim-settlement.component.ts /tmp/ci-angular/src/app/claim-settlement.component.ts
-      - name: Wire Component into Bootstrap
-        run: |
-          cat > /tmp/ci-angular/src/main.ts <<'EOF'
-          import { bootstrapApplication } from '@angular/platform-browser';
-          import { provideHttpClient } from '@angular/common/http';
-          import { ClaimSettlementComponent } from './app/claim-settlement.component';
-
-          bootstrapApplication(ClaimSettlementComponent, {
-            providers: [provideHttpClient()]
-          });
-          EOF
-
-          cat > /tmp/ci-angular/src/index.html <<'EOF'
-          <!doctype html>
-          <html lang="en">
-          <head><meta charset="utf-8"><title>Healthcare Payments Saga Ops</title></head>
-          <body><app-claim-settlement></app-claim-settlement></body>
-          </html>
-          EOF
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+      - name: Install Dependencies
+        working-directory: frontend
+        run: npm ci
       - name: Build (AOT Template Typecheck)
-        working-directory: /tmp/ci-angular
+        working-directory: frontend
         run: npx ng build
