@@ -1,31 +1,29 @@
-# Future Enhancements & OpenCode Prompts
+# Reference Template vs. Production-Ready Gap Analysis
 
-Copy and paste either prompt below into **OpenCode** (`opencode`) from the repository root to scaffold the next production capability while preserving `AGENTS.md` guardrails.
+This repository is structured as a **zero-dependency (.NET 10 BCL-only) reference template** for local concurrency, Saga compensation, and memory-SLA testing without requiring Docker, SQL Server, or external message brokers.
 
----
-
-## 1. SQL Server / Testcontainers Integration Tests (`001_init_ledger_and_outbox.sql`)
-
-```text
-Follow AGENTS.md and wire up a real SQL Server integration test suite using Testcontainers.MsSql and Microsoft.Data.SqlClient:
-1. Add Testcontainers.MsSql and Microsoft.Data.SqlClient to tests/Payments.Tests/Payments.Tests.csproj (keep -warnaserror clean).
-2. Create tests/Payments.Tests/SqlLedgerOutboxIntegrationTests.cs using an IAsyncLifetime fixture that starts an MsSqlBuilder container, executes sql/001_init_ledger_and_outbox.sql to create the schema and stored procedures, and seeds a payer account.
-3. Add integration tests verifying:
-   - Atomic semantic lock (AvailableBalance -> ReservedBalance) and dbo.OutboxMessages insertion inside a single SQL transaction.
-   - Concurrent duplicate ClaimId calls race safely against the UNIQUE constraint without double-deducting AvailableBalance or writing duplicate outbox messages.
-   - Compensating release restores AvailableBalance cleanly when a Saga fails.
-4. If Docker is unavailable in the local environment, skip the container test gracefully rather than failing fast unit test runs, and run dotnet test HealthcarePayments.sln --configuration Release -warnaserror to verify.
-```
+The comparison below shows how the current reference template differs from a **production-ready deployment**, aligned directly with **Section 4** of [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
-## 2. OpenTelemetry Console & OTLP Exporter Setup (`Program.cs`)
+## Reference Template vs. Production-Ready Comparison
 
-```text
-Follow AGENTS.md and configure OpenTelemetry distributed tracing and metrics in src/Payments.Api/Program.cs:
-1. Add OpenTelemetry.Extensions.Hosting, OpenTelemetry.Instrumentation.AspNetCore, OpenTelemetry.Instrumentation.Http, OpenTelemetry.Exporter.Console, and OpenTelemetry.Exporter.OpenTelemetryProtocol to src/Payments.Api/Payments.Api.csproj.
-2. Register OpenTelemetry in Program.cs with ConfigureResource (service name "HealthcarePayments.Api"), subscribing to ClaimPaymentSagaOrchestrator.Telemetry.Name ("COMPANYNAME.HealthcarePayments.Saga") plus ASP.NET Core and HttpClient instrumentation.
-3. Configure exporters so OTEL_EXPORTER_OTLP_ENDPOINT enables the OTLP exporter when set, while falling back to the Console exporter in Development (and avoiding noisy console spam during Testing environments so xUnit output stays clean).
-4. Ensure incoming traceId / traceparent headers correlate with Activity.Current and update README.md with an example OTEL_EXPORTER_OTLP_ENDPOINT environment variable snippet.
-5. Run dotnet build HealthcarePayments.sln --configuration Release -warnaserror and dotnet test HealthcarePayments.sln --configuration Release --no-build to verify.
-```
+| Capability | Current Reference Template (BCL-Only) | Production-Ready Target State |
+| :--- | :--- | :--- |
+| **Ledger & Outbox Persistence** | Uses `InMemoryPaymentLedgerStore` (`ConcurrentDictionary`) in `Payments.Api`. Reference T-SQL DDL and stored procedures (`sql/001_init_ledger_and_outbox.sql`) are included for schema validation but not wired to runtime execution. | Wired to **SQL Server / Azure SQL** via `Microsoft.Data.SqlClient`, executing atomic fund reservations (`AvailableBalance` → `ReservedBalance`) and `dbo.OutboxMessages` inserts inside a single local ACID transaction. |
+| **Transactional Outbox Relay** | Outbox messages are recorded in memory during reservation with no background dispatcher publishing events to downstream consumers. | Dedicated **lease-based Outbox Relay worker** (`BackgroundService`) polling `dbo.OutboxMessages` with `WITH (UPDLOCK, READPAST, ROWLOCK)` to publish `ClaimFundsReserved.v1` events safely across scaled-out replicas without duplicate delivery. |
+| **State-Aware Replay Short-Circuiting** | `TryReserveFundsAsync` returns the existing `SagaId` on `ClaimId` replay, but `ClaimPaymentSagaOrchestrator` still re-runs guardrails and invokes `SimulatedClearinghouseGateway` again. | **State-aware replay short-circuiting** inspects the persisted Saga state (`Reserved`, `Settled`, `Compensated`) on duplicate `ClaimId` requests and immediately returns the terminal outcome without re-invoking downstream ACH clearinghouse calls. |
+| **Durable Batch Ingestion & Poison-Frame Quarantine** | `ClaimStreamIngestor` streams NDJSON over `System.IO.Pipelines` into a bounded `Channel<T>` (`10,000` capacity); malformed JSON frames throw out of `ReadPipeAsync` and return HTTP `500`. | Uses hybrid `ReadOnlySpan<byte>` / `SequenceReader<byte>` zero-allocation framing and routes malformed or schema-invalid NDJSON records with trace metadata to a **durable poison-frame quarantine / dead-letter store** while valid frames continue processing. |
+| **ACH Clearinghouse Gateway** | `SimulatedClearinghouseGateway` runs in-process and deterministically rejects NPIs starting with `999`. | Typed HTTP/gRPC **ISO 20022 / NACHA ACH client** wrapped in `Microsoft.Extensions.Http.Resilience` (timeouts, jittered exponential retries, and circuit breakers) plus a **Stuck-Saga Reaper** for crash recovery. |
+| **Integration Testing & Observability** | Fast in-memory `xUnit` concurrency, compensation, and `0-byte` GC allocation tests (`PaymentSagaAndPipelineTests.cs`), with no-op `ActivitySource` instances. | Automated **`Testcontainers.MsSql`** integration test suite validating real `UPDLOCK`/`READPAST` lock contention and SQL constraints, paired with **OpenTelemetry OTLP exporters** for distributed traces, metrics, and HIPAA/SOC2 audit logs. |
+| **API Security & Multi-Tenancy** | Unauthenticated Minimal API endpoints (`Program.cs`) for local development and Angular proxy testing. | **OAuth 2.0 / OIDC JWT authentication**, scope-based authorization (`claims.settle`), payer-tenant isolation, mTLS for clearinghouse callbacks, and ASP.NET Core rate limiting. |
+
+---
+
+## Production Hardening Checklist
+
+* [ ] **SQL Server & Outbox Relay:** Wire `sql/001_init_ledger_and_outbox.sql` to `Payments.Api` and implement a leased `UPDLOCK, READPAST` Outbox Relay `BackgroundService`.
+* [ ] **State-Aware Replay Short-Circuiting:** Short-circuit already-`Settled` or `Compensated` `ClaimId` replays before invoking guardrails or the ACH clearinghouse.
+* [ ] **Durable Poison-Frame Quarantine:** Implement hybrid `SequenceReader<byte>` framing in `ClaimStreamIngestor` and isolate malformed NDJSON frames into a dead-letter queue without failing valid batch records.
+* [ ] **Testcontainers & OpenTelemetry OTLP:** Add `Testcontainers.MsSql` concurrency tests and configure OTLP trace/metric exporters in `Program.cs`.
+* [ ] **Authentication & Rate Limiting:** Enforce JWT bearer auth, tenant scoping, and endpoint rate limits on `/api/claims/*`.
