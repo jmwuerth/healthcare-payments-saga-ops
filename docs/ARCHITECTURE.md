@@ -70,3 +70,11 @@ flowchart LR
 | **AI Guardrails** | `AGENTS.md` | Constrains OpenCode and Copilot to zero-allocation hot paths, Saga+Outbox patterns, and OpenTelemetry `ActivitySource` tracing. |
 | **Segregation of Duties** | `.github/CODEOWNERS` | Requires `@jmwuerth` approval for changes to `/sql/`, `/Guardrails/`, `/AGENTS.md`, or `/.github/workflows/`. |
 | **Automated CI Gates** | `.github/workflows/ci-cd.yml` | Enforces `dotnet build -warnaserror` and blocks PR merges if concurrency, compensation, or `0-byte` GC SLA tests fail. |
+
+---
+
+## 4. Template Scope vs. Production Hardening Roadmap
+
+This repository is structured as a zero-dependency (.NET 10 BCL-only) reference template for local concurrency and memory-SLA testing.
+* **Current Reference Implementation:** Uses BCL-only runtime (`Payments.Api`) with in-memory ledger/clearinghouse simulators, reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`) for atomic fund reservations, and non-blocking `System.IO.Pipelines` ingestion.
+* **Production Hardening Roadmap:** Details future enhancements including lease-based Outbox Relay workers (`UPDLOCK, READPAST`), state-aware replay short-circuiting, durable batch ingestion with poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration.

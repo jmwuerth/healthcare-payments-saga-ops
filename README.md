@@ -55,6 +55,8 @@ This repository demonstrates two core pillars required for high-throughput finan
 * **Deterministic AI & Policy Guardrails (`PaymentComplianceGuardrail.cs`):** Enforces strict financial ceilings (`$250,000` automated limit) and 10-digit NPI validation before funds move, tested against a `0-byte` managed heap allocation SLA (`GC.GetTotalMemory`).
 * **Frontend Idempotency (`claim-settlement.component.ts`):** Uses RxJS `exhaustMap` and Angular Signals to drop duplicate clicks while a Saga is in flight, rotating a client-side UUID `claimId` upon settlement.
 
+> **Reference Template Boundary:** To keep `Payments.Api` 100% .NET 10 Base Class Library (BCL-only) with zero external NuGet dependencies out of the box, the runnable API uses an in-memory ledger and clearinghouse simulator alongside reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`). See [Section 4 of `docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-template-scope-vs-production-hardening-roadmap) and [`ROADMAP.md`](ROADMAP.md) for the production hardening roadmap (Outbox Relay worker with `UPDLOCK/READPAST` leasing, state-aware replay short-circuiting, poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration).
+
 ### Why Saga + Transactional Outbox Over Two-Phase Commit (2PC)?
 
 2PC holds distributed locks across every participant until the slowest one votes, so a single stalled ACH or ledger call freezes payer balances service-wide. This template keeps all locking local and makes the event publication atomic with the state change. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the sequence diagrams and `System.IO.Pipelines` backpressure internals.
