@@ -68,6 +68,14 @@ This repository demonstrates two core pillars required for high-throughput finan
 | **Failure & Rollback** | Abort requires every participant to be reachable and to honor the prepared vote; heuristic outcomes leave balances stranded. | `CompensateReservationAsync` restores reserved funds on any post-reservation failure and returns `409 Conflict` with liquidity fully restored. |
 | **Retry Safety** | Retry semantics are coordinator-defined; duplicate commits after a timeout are a real double-charge risk. | Client-generated `ClaimId` idempotency keys make replays safe, and the Angular `exhaustMap` guard suppresses duplicate in-flight clicks. |
 
+### Event Semantics & Boundary Contracts
+
+Replacing synchronous 2PC calls with a Transactional Outbox eliminates **temporal coupling**, but downstream consumers remain bound by **semantic and behavioral contracts**:
+
+* **Workflow Ordering (`Reserved` $\neq$ `Compliant`):** In `ClaimPaymentSagaOrchestrator`, `usp_ReserveClaimFundsWithOutbox` commits the `ClaimFundsReserved.v1` outbox event *before* `PaymentComplianceGuardrail` and the ACH gateway execute. Downstream consumers subscribing to `ClaimFundsReserved.v1` must treat it strictly as a **provisional liquidity lock**, not an authorized disbursement.
+* **Compensation & Rejection Semantics (`state: 3`):** Any post-reservation failure (guardrail violation or ACH rejection) triggers `CompensateReservationAsync` and returns `409 Conflict` with `state: 3` (`Compensated`). Immediate pre-lock rejections (such as insufficient payer liquidity) also return `409 Conflict` with `state: 3` and a zeroed `SagaId` so HTTP clients have a uniform error contract.
+* **Idempotency Replay Scope:** `ClaimId` idempotency prevents double-reserving `AvailableBalance` in the ledger, while leaving the client key intact on `409 Conflict` for safe operator retries.
+
 ---
 
 ## Proof of Idempotency & Double-Click Guard
