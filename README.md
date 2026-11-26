@@ -184,6 +184,14 @@ The `409 Conflict` view demonstrates automatic **semantic-lock compensation**. W
 
 ---
 
+## Proof of Browser Exfiltration Defense (Strict CSP)
+
+![Chrome DevTools Console blocking unauthorized outbound fetch via Content Security Policy](docs/images/csp-exfiltration-block.png)
+
+Even if an upstream dependency or third-party script is compromised, `frontend/src/index.html` enforces a strict **Content Security Policy (`connect-src 'self' ...`)** that blocks unauthorized outbound `fetch`/`XHR` calls at the browser boundary—preventing silent exfiltration of payment payloads or provider identifiers.
+
+---
+
 ## Quick Start & Quality Gates
 
 ### Prerequisites
