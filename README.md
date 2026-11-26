@@ -47,6 +47,89 @@ This repository demonstrates two core pillars required for high-throughput finan
 
 ## Key Architectural Highlights
 
+### Current Implementation Flow (as implemented)
+
+```mermaid
+flowchart TD
+
+    subgraph CLIENT["Tier 1 · Angular Client"]
+        direction TB
+        UI["ClaimSettlementComponent · RxJS exhaustMap drops duplicate clicks while a saga is in flight"]
+        KEY["Client-generated claimId · rotated on 200 OK · preserved on 409 Conflict"]
+        UI --> KEY
+    end
+
+    subgraph INGRESS["Tier 2 · Ingress · .NET 10 Minimal API (Program.cs)"]
+        direction TB
+        SETTLE["POST /api/claims/settle · synchronous saga execution"]
+        BATCH["POST /api/claims/ingest-batch · NDJSON request body"]
+        ING["ClaimStreamIngestor · System.IO.Pipelines fill and read loops · newline framing · Utf8JsonReader"]
+        CHAN["Bounded Channel of ClaimPaymentCommand · capacity 10,000 · FullMode Wait backpressure"]
+        WORKER["ClaimSagaConsumerWorker · BackgroundService · awaits orchestrator per frame"]
+        ACC["202 Accepted · QueuedClaims = parsed frame count"]
+        POISON["Malformed NDJSON line · exception escapes ReadPipeAsync · request returns 500"]
+        BATCH --> ING
+        ING --> CHAN
+        CHAN --> WORKER
+        ING --> ACC
+        ING -.-> POISON
+    end
+
+    KEY -->|"POST /api/claims/settle"| SETTLE
+
+    subgraph SAGA["Tier 3 · Saga Orchestration (ClaimPaymentSagaOrchestrator)"]
+        direction TB
+        S1["Step 1 · InMemoryPaymentLedgerStore.TryReserveFundsAsync · ClaimId idempotency gate"]
+        S1A["ClaimId already Settled · short-circuit · return cached SagaExecutionRecord"]
+        S1B["ClaimId still Reserved · reject duplicate in-flight attempt"]
+        S1C["ClaimId Compensated · drop stale key · reserve cleanly on retry"]
+        S1D["AvailableBalance below amount · reject with empty SagaId"]
+        S2["Step 2 · PaymentComplianceGuardrail.Validate · amount above 0 · at most $250,000 · exactly 10 numeric NPI digits"]
+        S3["Step 3 · SimulatedClearinghouseGateway.SettleAchAsync · rejects NPIs starting with 999"]
+        DDL["Reference only · sql/001_init_ledger_and_outbox.sql · PayerAccounts · ClaimPaymentSagas · OutboxMessages · usp_ReserveClaimFundsWithOutbox · never executed at runtime"]
+        S1 --> S1A
+        S1 --> S1B
+        S1 --> S1C
+        S1 --> S1D
+        S1 -->|"funds reserved atomically"| S2
+        S2 -->|"compliant"| S3
+        DDL -.-> S1
+    end
+
+    SETTLE --> S1
+    WORKER -->|"async · outcome discarded"| S1
+
+    subgraph OUTCOME["Tier 4 · Terminal Outcomes"]
+        direction TB
+        OK["200 OK · State = 2 Settled · SagaId and TraceId returned"]
+        CONFLICT["409 Conflict · State = 3 Compensated · failureReason returned"]
+        BUSY["409 Conflict · State = 1 Reserved · settlement already in progress"]
+    end
+
+    S1A --> OK
+    S1B --> BUSY
+    S1D --> CONFLICT
+    S2 -->|"violation · CompensateReservationAsync restores payer balance"| CONFLICT
+    S3 -->|"ACH rejected · CompensateReservationAsync restores payer balance"| CONFLICT
+    S3 -->|"ACH accepted · MarkSettledAsync"| OK
+
+    classDef client fill:#e8f0fe,stroke:#1a73e8,color:#0b1b33
+    classDef ingress fill:#e6f4ea,stroke:#1a7f37,color:#0b2a14
+    classDef saga fill:#fff4e5,stroke:#b45309,color:#3b1d02
+    classDef ok fill:#dafbe1,stroke:#1a7f37,color:#0b2a14
+    classDef err fill:#ffebe9,stroke:#cf222e,color:#4b0f14
+    classDef ref fill:#f6f8fa,stroke:#8c959f,color:#1f2328
+
+    class UI,KEY client
+    class SETTLE,BATCH,ING,CHAN,WORKER,ACC,POISON ingress
+    class S1,S1A,S1B,S1C,S1D,S2,S3 saga
+    class OK ok
+    class CONFLICT,BUSY err
+    class DDL ref
+```
+
+> Diagram reflects the code on `main` today: in-memory ledger, simulated clearinghouse, no outbox relay, no poison-frame quarantine. `sql/001_init_ledger_and_outbox.sql` is reference DDL only.
+
 * **Zero-Allocation Batch Ingestion (`ClaimStreamIngestor.cs`):** Streams raw NDJSON claim batches via `System.IO.Pipelines` with explicit high/low watermarks (`64 KB` / `32 KB`), hybrid `ReadOnlySpan<byte>` / `SequenceReader<byte>` framing, `Utf8JsonReader` parsing (zero intermediate heap strings), poison-frame quarantine, and bounded `Channel<T>` backpressure.
 * **Saga Orchestration & Transactional Outbox (`ClaimPaymentSagaOrchestrator.cs` & `001_init_ledger_and_outbox.sql`):**
   * Avoids cross-service 2PC locks by committing a **semantic lock** (`AvailableBalance` $\rightarrow$ `ReservedBalance`) and writing the `ClaimFundsReserved.v1` event to `dbo.OutboxMessages` inside a single local ACID transaction.
