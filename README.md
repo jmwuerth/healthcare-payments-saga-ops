@@ -61,6 +61,7 @@ flowchart TD
 
     subgraph INGRESS["Tier 2 · Ingress · .NET 10 Minimal API (Program.cs)"]
         direction TB
+        RATE["PaymentIngressPolicy token bucket · 100 burst / 50 per second · QueueLimit 0 · 429 with jittered Retry-After 1-5s"]
         SETTLE["POST /api/claims/settle · synchronous saga execution"]
         BATCH["POST /api/claims/ingest-batch · NDJSON request body"]
         ING["ClaimStreamIngestor · System.IO.Pipelines fill and read loops · newline framing · Utf8JsonReader"]
@@ -68,6 +69,8 @@ flowchart TD
         WORKER["ClaimSagaConsumerWorker · BackgroundService · awaits orchestrator per frame"]
         ACC["202 Accepted · QueuedClaims = parsed frame count"]
         POISON["Malformed NDJSON line · exception escapes ReadPipeAsync · request returns 500"]
+        RATE --> SETTLE
+        RATE --> BATCH
         BATCH --> ING
         ING --> CHAN
         CHAN --> WORKER
@@ -75,17 +78,19 @@ flowchart TD
         ING -.-> POISON
     end
 
-    KEY -->|"POST /api/claims/settle"| SETTLE
+    KEY -->|"POST /api/claims/settle"| RATE
 
     subgraph SAGA["Tier 3 · Saga Orchestration (ClaimPaymentSagaOrchestrator)"]
         direction TB
+        COALESCE["Single-flight coalescing · ConcurrentDictionary of Lazy Task keyed by ClaimId · 50 duplicate retries collapse into 1 execution"]
         S1["Step 1 · InMemoryPaymentLedgerStore.TryReserveFundsAsync · ClaimId idempotency gate"]
         S1A["ClaimId already Settled · short-circuit · return cached SagaExecutionRecord"]
         S1B["ClaimId still Reserved · reject duplicate in-flight attempt"]
         S1C["ClaimId Compensated · drop stale key · reserve cleanly on retry"]
         S1D["AvailableBalance below amount · reject with empty SagaId"]
         S2["Step 2 · PaymentComplianceGuardrail.Validate · amount above 0 · at most $250,000 · exactly 10 numeric NPI digits"]
-        S3["Step 3 · SimulatedClearinghouseGateway.SettleAchAsync · rejects NPIs starting with 999"]
+        S3["Step 3 · HttpClearinghouseGateway.SettleAchAsync · AchClearinghouseGuard jittered retry · circuit breaker FailureRatio 0.5 · 2s per-attempt timeout"]
+        SIM["SimulatedClearinghouseGateway · deterministic fallback when Clearinghouse:BaseUrl is unset · rejects NPIs starting with 999"]
         DDL["Reference only · sql/001_init_ledger_and_outbox.sql · PayerAccounts · ClaimPaymentSagas · OutboxMessages · usp_ReserveClaimFundsWithOutbox · never executed at runtime"]
         S1 --> S1A
         S1 --> S1B
@@ -94,16 +99,19 @@ flowchart TD
         S1 -->|"funds reserved atomically"| S2
         S2 -->|"compliant"| S3
         DDL -.-> S1
+        S3 -.-> SIM
     end
 
-    SETTLE --> S1
-    WORKER -->|"async · outcome discarded"| S1
+    SETTLE --> COALESCE
+    COALESCE --> S1
+    WORKER -->|"async · outcome discarded"| COALESCE
 
     subgraph OUTCOME["Tier 4 · Terminal Outcomes"]
         direction TB
         OK["200 OK · State = 2 Settled · SagaId and TraceId returned"]
         CONFLICT["409 Conflict · State = 3 Compensated · failureReason returned"]
         BUSY["409 Conflict · State = 1 Reserved · settlement already in progress"]
+        UNAVAILABLE["503 Service Unavailable · State = 3 Compensated · IsTransient = true"]
     end
 
     S1A --> OK
@@ -111,6 +119,7 @@ flowchart TD
     S1D --> CONFLICT
     S2 -->|"violation · CompensateReservationAsync restores payer balance"| CONFLICT
     S3 -->|"ACH rejected · CompensateReservationAsync restores payer balance"| CONFLICT
+    S3 -->|"circuit open · CompensateReservationAsync restores payer balance"| UNAVAILABLE
     S3 -->|"ACH accepted · MarkSettledAsync"| OK
 
     classDef client fill:#e8f0fe,stroke:#1a73e8,color:#0b1b33
@@ -121,14 +130,14 @@ flowchart TD
     classDef ref fill:#f6f8fa,stroke:#8c959f,color:#1f2328
 
     class UI,KEY client
-    class SETTLE,BATCH,ING,CHAN,WORKER,ACC,POISON ingress
-    class S1,S1A,S1B,S1C,S1D,S2,S3 saga
+    class RATE,SETTLE,BATCH,ING,CHAN,WORKER,ACC,POISON ingress
+    class COALESCE,S1,S1A,S1B,S1C,S1D,S2,S3 saga
     class OK ok
-    class CONFLICT,BUSY err
-    class DDL ref
+    class CONFLICT,BUSY,UNAVAILABLE err
+    class DDL,SIM ref
 ```
 
-> Diagram reflects the code on `main` today: in-memory ledger, simulated clearinghouse, no outbox relay, no poison-frame quarantine. `sql/001_init_ledger_and_outbox.sql` is reference DDL only.
+> Diagram reflects the code on `main` today: in-memory ledger, `SimulatedClearinghouseGateway` as the default ACH path (the HTTP gateway is used only when `Clearinghouse:BaseUrl` is configured), no outbox relay, no poison-frame quarantine. `sql/001_init_ledger_and_outbox.sql` is reference DDL only.
 
 * **Zero-Allocation Batch Ingestion (`ClaimStreamIngestor.cs`):** Streams raw NDJSON claim batches via `System.IO.Pipelines` with explicit high/low watermarks (`64 KB` / `32 KB`), hybrid `ReadOnlySpan<byte>` / `SequenceReader<byte>` framing, `Utf8JsonReader` parsing (zero intermediate heap strings), poison-frame quarantine, and bounded `Channel<T>` backpressure.
 * **Saga Orchestration & Transactional Outbox (`ClaimPaymentSagaOrchestrator.cs` & `001_init_ledger_and_outbox.sql`):**
@@ -137,8 +146,10 @@ flowchart TD
   * Automatically executes `CompensateReservationAsync` to restore payer liquidity if compliance guardrails or external ACH clearinghouse settlement fail.
 * **Deterministic AI & Policy Guardrails (`PaymentComplianceGuardrail.cs`):** Enforces strict financial ceilings (`$250,000` automated limit) and 10-digit NPI validation before funds move, tested against a `0-byte` managed heap allocation SLA (`GC.GetTotalMemory`).
 * **Frontend Idempotency (`claim-settlement.component.ts`):** Uses RxJS `exhaustMap` and Angular Signals to drop duplicate clicks while a Saga is in flight, rotating a client-side UUID `claimId` upon settlement.
+* **Anti-Thundering-Herd Resilience (`Program.cs`, `AchResiliencePipeline.cs`, `ClaimPaymentSagaOrchestrator.cs`):** A `PaymentIngressPolicy` token bucket (`QueueLimit = 0`) sheds overload with `429 Too Many Requests` and a cryptographically jittered `Retry-After` (1–5 s); the ACH client is wrapped in `AchClearinghouseGuard` (decorrelated-jitter exponential retries, `FailureRatio = 0.5` circuit breaker, 2 s per-attempt timeout); and concurrent retries for one `ClaimId` are coalesced single-flight, so 50 duplicate posts produce exactly one clearinghouse call.
+* **Supply-Chain & Blast-Radius Gates (`Directory.Build.props`, `Directory.Packages.props`, `sql/001_init_ledger_and_outbox.sql`, `frontend/src/index.html`):** Central package management with committed `packages.lock.json` files and `--locked-mode` restores; `latest-recommended` analyzers plus pinned private `SecurityCodeScan` / `SonarAnalyzer` with warnings-as-errors; least-privilege SQL RBAC (`GRANT EXECUTE` only, `DENY` direct table access); and a strict CSP meta tag that blocks third-party scripts and unauthorized data exfiltration.
 
-> **Reference Template Boundary:** To keep `Payments.Api` 100% .NET 10 Base Class Library (BCL-only) with zero external NuGet dependencies out of the box, the runnable API uses an in-memory ledger and clearinghouse simulator alongside reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`). See [Section 4 of `docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-template-scope-vs-production-hardening-roadmap) and [[`docs/ROADMAP.md`](docs/ROADMAP.md)]([docs/ROADMAP.md](docs/ROADMAP.md)) for the production hardening roadmap (Outbox Relay worker with `UPDLOCK/READPAST` leasing, state-aware replay short-circuiting, poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration).
+> **Reference Template Boundary:** `Payments.Api` is framework-first rather than dependency-free: the single runtime NuGet dependency is `Microsoft.Extensions.Http.Resilience` (ACH egress), while the ledger and clearinghouse simulator remain in-process so the runnable API needs no database or external service. Reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`) is provided for production wiring. See [Section 4 of `docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#4-template-scope-vs-production-hardening-roadmap) and [[`docs/ROADMAP.md`](docs/ROADMAP.md)]([docs/ROADMAP.md](docs/ROADMAP.md)) for the production hardening roadmap (Outbox Relay worker with `UPDLOCK/READPAST` leasing, poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration).
 
 ### Why Saga + Transactional Outbox Over Two-Phase Commit (2PC)?
 
@@ -148,15 +159,15 @@ flowchart TD
 | --- | --- | --- |
 | **Locking & Contention** | Enlists every resource manager; locks are held network-wide until the coordinator commits or aborts, so one slow participant blocks unrelated claims. | Single local T-SQL transaction applying the semantic lock `AvailableBalance` → `ReservedBalance`; no lock survives the commit. |
 | **Event Atomicity** | No guarantee that the commit and the downstream event publish both succeed; a crash between them silently loses the event. | `ClaimFundsReserved.v1` is written to `dbo.OutboxMessages` in the **same** local ACID transaction as the balance mutation. |
-| **Failure & Rollback** | Abort requires every participant to be reachable and to honor the prepared vote; heuristic outcomes leave balances stranded. | `CompensateReservationAsync` restores reserved funds on any post-reservation failure and returns `409 Conflict` with liquidity fully restored. |
-| **Retry Safety** | Retry semantics are coordinator-defined; duplicate commits after a timeout are a real double-charge risk. | Client-generated `ClaimId` idempotency keys make replays safe, and the Angular `exhaustMap` guard suppresses duplicate in-flight clicks. |
+| **Failure & Rollback** | Abort requires every participant to be reachable and to honor the prepared vote; heuristic outcomes leave balances stranded. | `CompensateReservationAsync` restores reserved funds on any post-reservation failure and returns `409 Conflict` with liquidity fully restored (or `503 Service Unavailable` when the ACH circuit is open). |
+| **Retry Safety** | Retry semantics are coordinator-defined; duplicate commits after a timeout are a real double-charge risk. | Client-generated `ClaimId` idempotency keys make replays safe, single-flight coalescing collapses concurrent duplicates, and the Angular `exhaustMap` guard suppresses duplicate in-flight clicks. |
 
 ### Event Semantics & Boundary Contracts
 
 Replacing synchronous 2PC calls with a Transactional Outbox eliminates **temporal coupling**, but downstream consumers remain bound by **semantic and behavioral contracts**:
 
 * **Workflow Ordering (`Reserved` $\neq$ `Compliant`):** In `ClaimPaymentSagaOrchestrator`, `usp_ReserveClaimFundsWithOutbox` commits the `ClaimFundsReserved.v1` outbox event *before* `PaymentComplianceGuardrail` and the ACH gateway execute. Downstream consumers subscribing to `ClaimFundsReserved.v1` must treat it strictly as a **provisional liquidity lock**, not an authorized disbursement.
-* **Compensation & Rejection Semantics (`state: 3`):** Any post-reservation failure (guardrail violation or ACH rejection) triggers `CompensateReservationAsync` and returns `409 Conflict` with `state: 3` (`Compensated`). Immediate pre-lock rejections (such as insufficient payer liquidity) also return `409 Conflict` with `state: 3` and a zeroed `SagaId` so HTTP clients have a uniform error contract.
+* **Compensation & Rejection Semantics (`state: 3`):** Any post-reservation failure (guardrail violation or ACH rejection) triggers `CompensateReservationAsync` and returns `409 Conflict` with `state: 3` (`Compensated`). A tripped ACH circuit breaker also compensates, but returns `503 Service Unavailable` with `isTransient: true` so clients back off instead of treating it as a business rejection. Immediate pre-lock rejections (such as insufficient payer liquidity) also return `409 Conflict` with `state: 3` and a zeroed `SagaId` so HTTP clients have a uniform error contract.
 * **Idempotency Replay Scope:** `ClaimId` idempotency prevents double-reserving `AvailableBalance` in the ledger, while leaving the client key intact on `409 Conflict` for safe operator retries.
 
 ---
@@ -182,13 +193,16 @@ The `409 Conflict` view demonstrates automatic **semantic-lock compensation**. W
 
 ### Build & Run Quality Gates Locally
 ```bash
-# 1. Restore and compile with warnings treated as errors
-dotnet build HealthcarePayments.sln --configuration Release -warnaserror
+# 1. Restore from the committed lockfiles (fails if a dependency drifted)
+dotnet restore HealthcarePayments.sln --locked-mode
 
-# 2. Run concurrency, Saga compensation, Pipeline, and GC allocation tests
+# 2. Compile with analyzers + warnings treated as errors
+dotnet build HealthcarePayments.sln --configuration Release --no-restore -warnaserror
+
+# 3. Run concurrency, Saga compensation, Pipeline, resilience and coalescing tests
 dotnet test HealthcarePayments.sln --configuration Release --no-build --verbosity normal
 
-# 3. Run the Minimal API locally
+# 4. Run the Minimal API locally
 dotnet run --project src/Payments.Api/Payments.Api.csproj
 ```
 
