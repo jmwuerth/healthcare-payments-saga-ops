@@ -75,6 +75,63 @@ flowchart LR
 
 ## 4. Template Scope vs. Production Hardening Roadmap
 
-This repository is structured as a zero-dependency (.NET 10 BCL-only) reference template for local concurrency and memory-SLA testing.
-* **Current Reference Implementation:** Uses BCL-only runtime (`Payments.Api`) with in-memory ledger/clearinghouse simulators, reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`) for atomic fund reservations, and non-blocking `System.IO.Pipelines` ingestion.
-* **Production Hardening Roadmap:** Details future enhancements including lease-based Outbox Relay workers (`UPDLOCK, READPAST`), state-aware replay short-circuiting, durable batch ingestion with poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration.
+This repository is structured as a lightweight, self-contained reference template (requiring no external database, broker, or Docker daemon to build and run) for local concurrency, resilience, and memory-SLA testing.
+* **Current Reference Implementation:** Uses an in-memory ledger and deterministic clearinghouse simulator alongside `Microsoft.Extensions.Http.Resilience` (jittered retries, circuit breaker, timeouts), edge rate limiting, single-flight coalescing, reference T-SQL DDL (`sql/001_init_ledger_and_outbox.sql`), and non-blocking `System.IO.Pipelines` ingestion.
+* **Production Hardening Roadmap:** Details future enhancements including lease-based Outbox Relay workers (`UPDLOCK, READPAST, ROWLOCK`), durable batch ingestion with poison-frame quarantine, and `Testcontainers.MsSql` / OpenTelemetry OTLP integration.
+
+### Production-Ready Target Architecture (End-to-End Blueprint)
+
+The diagram below illustrates the full production target state—combining our current **supply-chain security**, **browser CSP**, **edge rate limiting**, **single-flight coalescing**, and **Polly v8 circuit breaker** controls with the **lease-based T-SQL Outbox Relay (`UPDLOCK, READPAST, ROWLOCK`)** and **downstream consumer deduplication**:
+
+```mermaid
+flowchart TD
+    subgraph GOV["0. Supply-Chain & Compiler Governance Gate (Build / CI / GitHub)"]
+        direction LR
+        CPM["Directory.Packages.props + packages.lock.json<br/>(--locked-mode SHA-512 verification)"]
+        ROSLYN["Directory.Build.props<br/>(-warnaserror + SecurityCodeScan + SonarAnalyzer)"]
+        OWNERS[".github/CODEOWNERS<br/>(Dual-Control on SQL, Guardrails & Props)"]
+    end
+
+    subgraph INGRESS["1. Hardened Client, Edge Load Shedding & Local ACID Boundary"]
+        direction TB
+        CLIENT["Angular UI (Strict CSP + exhaustMap)<br/>or Batch NDJSON Stream"]
+        RL["Edge Token-Bucket Rate Limiter (PaymentIngressPolicy)<br/>Sheds bursts: 429 Too Many Requests + Jittered Retry-After (1-5s)"]
+        COALESCE["Payments.Api Pod<br/>1. Single-Flight Coalescing: ConcurrentDictionary&lt;ClaimId, Lazy&lt;Task&gt;&gt;<br/>2. Zero-Alloc Guardrail: &lt;= \$250k, 10-digit NPI (0-byte GC SLA)<br/>3. Least-Privilege EXECUTE-only SQL RBAC"]
+        SQL["SQL Server (Primary OLTP — Single Local ACID Transaction)<br/>(a) ClaimPaymentSagas → UNIQUE(ClaimId) check (Settled → 200; Reserved → 409)<br/>(b) PayerAccounts → Semantic Lock: AvailableBalance - Amt, ReservedBalance + Amt<br/>(c) OutboxMessages → INSERT (MessageId, ClaimId, Payload, TraceId, ProcessedAt=NULL)"]
+
+        CLIENT -->|"POST /api/claims/settle<br/>(ClaimId + W3C traceparent)"| RL
+        RL --> COALESCE
+        COALESCE -->|"EXEC usp_ReserveClaimFundsWithOutbox"| SQL
+    end
+
+    GOV -.->|"Enforces build, test & review gates"| INGRESS
+
+    subgraph RELAY["2. Lock-Free Horizontal Outbox Relay & Resilient Egress (Scaled-Out Pods)"]
+        direction TB
+        PODA["OutboxRelayWorker (Pod A)<br/>PeriodicTimer (200ms)<br/>Claims Rows 1..50 WITH (UPDLOCK, READPAST, ROWLOCK)<br/>LockedUntilUtc = NOW + 30s | AttemptCount += 1"]
+        PODB["OutboxRelayWorker (Pod B)<br/>PeriodicTimer (200ms)<br/>Skips Rows 1..50 immediately (zero wait!)<br/>Claims Rows 51..100 | LockedUntilUtc = NOW + 30s"]
+        CHAN["Bounded Channel&lt;T&gt; (Cap: 500)<br/>FullMode.Wait Backpressure + W3C ActivityContext"]
+        POLLY["Polly v8 Egress Guard (AchClearinghouseGuard)<br/>• Decorrelated Jitter Exponential Retries (UseJitter = true)<br/>• Circuit Breaker (FailureRatio = 0.5, 30s break) + 2s Timeout<br/>• Open Circuit → CompensateReservationAsync() + 503 Fast Fail"]
+        SUCC["Publish Succeeds<br/>1. Broker ACK (Partition Key = ClaimId)<br/>2. Fencing-Token Completion:<br/>UPDATE OutboxMessages SET ProcessedAt = NOW<br/>WHERE MessageId = @Id AND LockedUntilUtc = @Lease"]
+        CRASH["Pod A Crashes / GC Freeze<br/>1. ProcessedAt stays NULL; after 30s lease expires<br/>2. Pod B reclaims expired row & republishes<br/>3. Late Pod A UPDATE fails (0 rows affected — zombie blocked)<br/>4. AttemptCount &gt;= 5 → Dead-Letter / Alert"]
+
+        PODA --> CHAN
+        PODB --> CHAN
+        CHAN --> POLLY
+        POLLY --> SUCC
+        POLLY -.-> CRASH
+    end
+
+    SQL -->|"Filtered Covering Index: IX_Outbox_ActivePoll<br/>WHERE ProcessedAt IS NULL AND AttemptCount &lt; 5"| PODA
+    SQL -->|"Filtered Covering Index: IX_Outbox_ActivePoll"| PODB
+
+    subgraph CONSUMER["3. Downstream Idempotent Consumers (At-Least-Once → Effectively-Once)"]
+        direction LR
+        BROKER["Kafka / IBM MQ<br/>(Key: ClaimId, Header: traceparent)"]
+        INBOX["Clearinghouse / Settlement Consumer<br/>Single Local Consumer Tx:<br/>1. INSERT INTO Inbox (MessageId) (PK violation → ignore retry)<br/>2. Execute downstream settlement"]
+        BROKER --> INBOX
+    end
+
+    SUCC --> BROKER
+    CRASH --> BROKER
+```
