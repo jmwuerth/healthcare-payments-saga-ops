@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Payments.Api.Guardrails;
 using Payments.Api.Pipelines;
+using Polly.CircuitBreaker;
 
 namespace Payments.Api.Sagas;
 
@@ -14,7 +15,8 @@ public sealed record SagaExecutionRecord(
     decimal Amount,
     SagaState State,
     string TraceId,
-    string? FailureReason = null);
+    string? FailureReason = null,
+    bool IsTransient = false);
 
 /// <summary>
 /// Orchestrates multi-step Healthcare Payment settlement without distributed 2PC locks:
@@ -29,7 +31,31 @@ public sealed class ClaimPaymentSagaOrchestrator(
 {
     public static readonly ActivitySource Telemetry = new("COMPANYNAME.HealthcarePayments.Saga");
 
+    private readonly ConcurrentDictionary<Guid, Lazy<Task<SagaExecutionRecord>>> _inFlight = new();
+
     public async Task<SagaExecutionRecord> ExecuteAsync(ClaimPaymentCommand cmd, CancellationToken ct)
+    {
+        // Single-flight: concurrent duplicates for the same ClaimId collapse into one execution.
+        var lazy = _inFlight.GetOrAdd(
+            cmd.ClaimId,
+            _ => new Lazy<Task<SagaExecutionRecord>>(
+                () => ExecuteCoreAsync(cmd, ct),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+
+        try
+        {
+            return await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Only evict once the shared execution has completed, and only this exact entry,
+            // so a newer in-flight registration is never removed by a late waiter.
+            if (lazy.IsValueCreated && lazy.Value.IsCompleted)
+                _inFlight.TryRemove(new KeyValuePair<Guid, Lazy<Task<SagaExecutionRecord>>>(cmd.ClaimId, lazy));
+        }
+    }
+
+    private async Task<SagaExecutionRecord> ExecuteCoreAsync(ClaimPaymentCommand cmd, CancellationToken ct)
     {
         using var activity = Telemetry.StartActivity("ExecuteClaimPaymentSaga");
         activity?.SetTag("claim.id", cmd.ClaimId);
@@ -73,7 +99,22 @@ public sealed class ClaimPaymentSagaOrchestrator(
         }
 
         // 3. External Clearinghouse Settlement (with Compensating Action on failure)
-        bool settled = await clearinghouse.SettleAchAsync(reservation.SagaId, cmd.ProviderNpi, cmd.Amount, ct);
+        bool settled;
+        try
+        {
+            settled = await clearinghouse.SettleAchAsync(reservation.SagaId, cmd.ProviderNpi, cmd.Amount, ct);
+        }
+        catch (BrokenCircuitException ex)
+        {
+            // The ACH circuit is open: fail fast and release the semantic lock immediately.
+            await ledgerStore.CompensateReservationAsync(reservation.SagaId, cmd.PayerId, cmd.Amount, ct);
+            logger.LogWarning(ex,
+                "Trace={TraceId} Claim={ClaimId} clearinghouse circuit open; compensating release executed.",
+                cmd.TraceId, cmd.ClaimId);
+            return new SagaExecutionRecord(reservation.SagaId, cmd.ClaimId, cmd.Amount, SagaState.Compensated,
+                cmd.TraceId, "Clearinghouse circuit open; reservation compensated", IsTransient: true);
+        }
+
         if (!settled)
         {
             await ledgerStore.CompensateReservationAsync(reservation.SagaId, cmd.PayerId, cmd.Amount, ct);
@@ -111,7 +152,7 @@ public sealed class InMemoryPaymentLedgerStore : IPaymentLedgerStore
     private readonly ConcurrentDictionary<Guid, Guid> _idempotencyIndex = new();
     private readonly ConcurrentDictionary<Guid, SagaState> _sagaStates = new();
     private readonly ConcurrentDictionary<Guid, SagaExecutionRecord> _settledRecords = new();
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
 
     public void SeedPayerBalance(Guid payerId, decimal balance) => _balances[payerId] = balance;
     public decimal GetBalance(Guid payerId) => _balances.GetValueOrDefault(payerId, 0m);

@@ -86,3 +86,23 @@ BEGIN
     SELECT @SagaId AS SagaId, 1 AS Status;
 END;
 GO
+
+-- ---------------------------------------------------------------------------
+-- Least-privilege RBAC for the application login.
+-- The app role may only EXECUTE the reservation procedure. Direct table access is
+-- denied so a compromised application credential cannot read payer balances or
+-- delete outbox messages (transactional-outbox tampering / data exfiltration).
+-- Ownership chaining (procedure and tables share the same owner) keeps the
+-- procedure working even though the role is denied on the underlying tables.
+-- ---------------------------------------------------------------------------
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'HealthcarePaymentsApp' AND type = 'R')
+    EXEC('CREATE ROLE HealthcarePaymentsApp AUTHORIZATION dbo;');
+GO
+
+GRANT EXECUTE ON OBJECT::dbo.usp_ReserveClaimFundsWithOutbox TO HealthcarePaymentsApp;
+GO
+
+DENY SELECT, INSERT, UPDATE, DELETE ON OBJECT::dbo.PayerAccounts TO HealthcarePaymentsApp;
+DENY SELECT, INSERT, UPDATE, DELETE ON OBJECT::dbo.ClaimPaymentSagas TO HealthcarePaymentsApp;
+DENY SELECT, INSERT, UPDATE, DELETE ON OBJECT::dbo.OutboxMessages TO HealthcarePaymentsApp;
+GO

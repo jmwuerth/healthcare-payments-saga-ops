@@ -1,5 +1,9 @@
-# Require Principal/Lead Engineer + AppSec sign-off on guardrails, CI/CD, and SQL ledger schemas
+# Require Principal/Lead Engineer + AppSec sign-off on guardrails, CI/CD, SQL ledger schemas,
+# and the supply-chain surface (build props, central package versions, locked restores)
 /AGENTS.md @jmwuerth
 /src/Payments.Api/Guardrails/ @jmwuerth
 /.github/workflows/ @jmwuerth
 /sql/ @jmwuerth
+/Directory.Build.props @jmwuerth
+/Directory.Packages.props @jmwuerth
+/**/packages.lock.json @jmwuerth

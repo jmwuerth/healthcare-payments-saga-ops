@@ -1,0 +1,19 @@
+<Project>
+
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <!-- CA1848: LoggerMessage source-generated delegates are a follow-up refactor; this logging is not hot-path. -->
+    <NoWarn>$(NoWarn);CA1848</NoWarn>
+  </PropertyGroup>
+
+  <!-- Private analyzers: security dataflow (SecurityCodeScan) + bug/quality rules (Sonar). Versions are pinned centrally. -->
+  <ItemGroup>
+    <PackageReference Include="SecurityCodeScan.VS2019" PrivateAssets="all" />
+    <PackageReference Include="SonarAnalyzer.CSharp" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

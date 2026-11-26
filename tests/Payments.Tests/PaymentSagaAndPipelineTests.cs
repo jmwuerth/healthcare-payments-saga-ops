@@ -62,8 +62,8 @@ public sealed class PaymentSagaAndPipelineTests
         var ingestor = new ClaimStreamIngestor(channel.Writer);
 
         var ndjson = new StringBuilder()
-            .AppendLine($"{{\"claimId\":\"{Guid.NewGuid()}\",\"payerId\":\"{Guid.NewGuid()}\",\"providerNpi\":\"1234567890\",\"amount\":250.50}}")
-            .AppendLine($"{{\"claimId\":\"{Guid.NewGuid()}\",\"payerId\":\"{Guid.NewGuid()}\",\"providerNpi\":\"0987654321\",\"amount\":900.00}}")
+            .AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"{{\"claimId\":\"{Guid.NewGuid()}\",\"payerId\":\"{Guid.NewGuid()}\",\"providerNpi\":\"1234567890\",\"amount\":250.50}}")
+            .AppendLine(System.Globalization.CultureInfo.InvariantCulture, $"{{\"claimId\":\"{Guid.NewGuid()}\",\"payerId\":\"{Guid.NewGuid()}\",\"providerNpi\":\"0987654321\",\"amount\":900.00}}")
             .ToString();
 
         await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(ndjson));
@@ -71,7 +71,7 @@ public sealed class PaymentSagaAndPipelineTests
 
         Assert.Equal(2, count);
         Assert.True(channel.Reader.TryRead(out var first));
-        Assert.Equal(250.50m, first!.Amount);
+        Assert.Equal(250.50m, first.Amount);
     }
 
     [Fact]
