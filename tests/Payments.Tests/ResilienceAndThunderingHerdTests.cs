@@ -5,12 +5,45 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Payments.Api.Hosting;
 using Payments.Api.Pipelines;
 using Payments.Api.Sagas;
+using System.Net.Http.Json; 
+using Microsoft.AspNetCore.Mvc.Testing;
+using System.Globalization;
 using Xunit;
 
 namespace Payments.Tests;
 
 public sealed class ResilienceAndThunderingHerdTests
 {
+    [Fact]
+    public async Task PaymentIngressRateLimiter_ShouldShedBurstWith429AndJitteredRetryAfter()
+    {
+        await using var factory = new WebApplicationFactory<Program>();
+        using var client = factory.CreateClient();
+
+        // PaymentIngressPolicy has TokenLimit = 100 and QueueLimit = 0
+        // firing 120 concurrent requests guarantees immediate 429 load shedding.
+        var requests = Enumerable.Range(0, 120).Select(_ =>
+            client.PostAsJsonAsync("/api/claims/settle", new
+            {
+                claimId = Guid.NewGuid(),
+                payerId = Guid.NewGuid(),
+                providerNpi = "1234567890",
+                amount = 100m,
+                traceId = "trace-rl"
+            }));
+
+        var responses = await Task.WhenAll(requests);
+        var throttled = responses.Where(r => r.StatusCode == HttpStatusCode.TooManyRequests).ToList();
+
+        Assert.NotEmpty(throttled);
+        Assert.All(throttled, res =>
+        {
+            Assert.True(res.Headers.TryGetValues("Retry-After", out var values));
+            int retryAfter = int.Parse(values.Single(), CultureInfo.InvariantCulture);
+            Assert.InRange(retryAfter, 1, 5); // Proves randomized jitter (1–5s)
+        });
+    }
+
     [Fact]
     public async Task ClearinghouseOutage_ShouldTripCircuitBreakerAndCompensateFunds()
     {
