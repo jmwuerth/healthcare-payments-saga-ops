@@ -216,6 +216,19 @@ dotnet run --project src/Payments.Api/Payments.Api.csproj
 
 ---
 
+## Responsible AI Governance & Supply-Chain Defense
+
+To meet enterprise banking standards for AI-assisted development (`OpenCode` / `Copilot`) and software supply-chain integrity, this repository enforces defense-in-depth at compile time, commit time, and runtime:
+
+| Control Layer | Enforced In | Mechanism & Blast-Radius Defense |
+| :--- | :--- | :--- |
+| **Dual-Control ("Four-Eyes" Principle)** | `.github/CODEOWNERS` & `AGENTS.md` | Requires independent `@jmwuerth` sign-off on high-blast-radius paths (`/sql/`, `/Guardrails/`, `/.github/workflows/`, `Directory.*.props`, `packages.lock.json`). Prevents an AI agent or single contributor from weakening the `$250k` settlement cap or 10-digit NPI invariant. |
+| **Deterministic Lockfile Integrity** | `Directory.Packages.props` & `ci-cd.yml` | Central Package Management (`ManagePackageVersionsCentrally`) with transitive pinning and SHA-512 `packages.lock.json` verification (`dotnet restore --locked-mode` and `npm ci`). Any unapproved or tampered dependency fails CI immediately. |
+| **Compile-Time Security & Bug Gates** | `Directory.Build.props` & `ci-cd.yml` | Enforces `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>` (`-warnaserror`), `latest-recommended` .NET analyzers, `SonarAnalyzer.CSharp`, and `SecurityCodeScan.VS2019` (`PrivateAssets="all"`). AI-generated code cannot pass `dotnet build` with lingering warnings or weak-crypto/injection findings (`SCS0005`, etc.). |
+| **Minimal Runtime Footprint & CSP** | `Payments.Api.csproj` & `frontend/src/index.html` | Ships only a single runtime NuGet dependency (`Microsoft.Extensions.Http.Resilience`) and enforces a strict browser Content Security Policy (`connect-src 'self'`) to block compromised frontend packages from exfiltrating payment payloads. |
+
+---
+
 ## Using This Repository as a Team Template
 
 Engineers can scaffold a new compliant microservice inheriting `AGENTS.md`, `CODEOWNERS`, OpenTelemetry `ActivitySource` tracing, and CI quality gates from Day 1:

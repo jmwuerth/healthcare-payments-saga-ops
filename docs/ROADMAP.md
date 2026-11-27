@@ -17,6 +17,7 @@ The comparison below shows how the current reference template differs from a **p
 | **ACH Clearinghouse Gateway** | `SimulatedClearinghouseGateway` runs in-process and deterministically rejects NPIs starting with `999`. | Typed HTTP/gRPC **ISO 20022 / NACHA ACH client** wrapped in `Microsoft.Extensions.Http.Resilience` (timeouts, jittered exponential retries, and circuit breakers) plus a **Stuck-Saga Reaper** for crash recovery. |
 | **Integration Testing & Observability** | Fast in-memory `xUnit` concurrency, compensation, and `0-byte` GC allocation tests (`PaymentSagaAndPipelineTests.cs`), with no-op `ActivitySource` instances. | Automated **`Testcontainers.MsSql`** integration test suite validating real `UPDLOCK`/`READPAST` lock contention and SQL constraints, paired with **OpenTelemetry OTLP exporters** for distributed traces, metrics, and HIPAA/SOC2 audit logs. |
 | **API Security & Multi-Tenancy** | Unauthenticated Minimal API endpoints (`Program.cs`) for local development and Angular proxy testing. | **OAuth 2.0 / OIDC JWT authentication**, scope-based authorization (`claims.settle`), payer-tenant isolation, mTLS for clearinghouse callbacks, and ASP.NET Core rate limiting. |
+| **Analyzer & Frontend Supply-Chain Hardening** | Pins `SecurityCodeScan.VS2019` (5.6.7) alongside `SonarAnalyzer.CSharp` on the backend; Angular 20 frontend relies on standard `npm ci` lockfile auditing. | Upgrade .NET analyzer profile to `<AnalysisMode>All</AnalysisMode>` (`latest-all`) for modern .NET 10 rules and add automated SBOM generation + `npm audit` / Socket.dev gates in `.github/workflows/ci-cd.yml`. |
 
 ---
 
@@ -27,3 +28,4 @@ The comparison below shows how the current reference template differs from a **p
 * [ ] **Durable Poison-Frame Quarantine:** Implement hybrid `SequenceReader<byte>` framing in `ClaimStreamIngestor` and isolate malformed NDJSON frames into a dead-letter queue without failing valid batch records.
 * [ ] **Testcontainers & OpenTelemetry OTLP:** Add `Testcontainers.MsSql` concurrency tests and configure OTLP trace/metric exporters in `Program.cs`.
 * [ ] **Authentication & Rate Limiting:** Enforce JWT bearer auth, tenant scoping, and endpoint rate limits on `/api/claims/*`.
+* [ ] **Analyzer & SBOM Hardening:** Enable `<AnalysisMode>All</AnalysisMode>` in `Directory.Build.props` and add CycloneDX SBOM + `npm audit --audit-level=high` gates to `.github/workflows/ci-cd.yml`.
