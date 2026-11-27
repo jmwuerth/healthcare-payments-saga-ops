@@ -70,6 +70,7 @@ flowchart LR
 | **AI Guardrails** | `AGENTS.md` | Constrains OpenCode and Copilot to zero-allocation hot paths, Saga+Outbox patterns, and OpenTelemetry `ActivitySource` tracing. |
 | **Segregation of Duties** | `.github/CODEOWNERS` | Requires `@jmwuerth` approval for changes to `/sql/`, `/Guardrails/`, `/AGENTS.md`, or `/.github/workflows/`. |
 | **Automated CI Gates** | `.github/workflows/ci-cd.yml` | Enforces `dotnet build -warnaserror` and blocks PR merges if concurrency, compensation, or `0-byte` GC SLA tests fail. |
+| **Supply-Chain & Blast Radius** | `Directory.Packages.props` & `index.html` | Enforces `--locked-mode` SHA-512 lockfiles, `SecurityCodeScan`/`SonarAnalyzer` (`PrivateAssets="all"`), `GRANT EXECUTE`-only SQL RBAC, and strict browser CSP (`connect-src 'self'`). |
 
 ---
 
